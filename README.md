@@ -1,3 +1,6 @@
-Protected Ranking in Men’s Professional Tennis: Epidemiological Trends and Career Sustainability
-Manuscript submitted to the Special Issue “Data Science for Sustainable Sports - Building a Sustainable Future for Sports” in Computational Statistics
+# Protected Ranking in Men’s Professional Tennis: Epidemiological Trends and Career Sustainability
+
+## Manuscript submitted to the Special Issue  
+**“Data Science for Sustainable Sports - Building a Sustainable Future for Sports”**  
+*Computational Statistics*
 This repository contains the material related to the manuscript “Protected Ranking in Men’s Professional Tennis: Epidemiological Trends and Career Sustainability”. The study investigates the epidemiological trends of Protected Ranking use in the ATP Tour and assesses the competitive outcomes of players returning to competition under this entry mechanism. Using retrospective ATP match data, the work describes the distribution of Protected Ranking across tournaments and evaluates whether the competitive performance of these players is consistent with their ranking-based competitive level.
