@@ -1,0 +1,929 @@
+---
+title: "Protected Ranking"
+author: "Jordi Cortés"
+date: "`r Sys.Date()`"
+output: 
+  html_document:
+    code_folding: hide
+    toc: yes
+    toc_float:
+      collapsed: true
+    number_sections: false
+---
+
+```{r warning=FALSE, message=FALSE}
+# Load data and libraries
+load("../Data/datos_combinados.RData")
+data <- datos_PR_periodo
+source('libraries.R')
+```
+
+# Executive summary
+
+## Goals
+
+Three goals related to protected ranking tennis players are examined using match data from 2000 to 2024:
+
+- Goal 1 (**G1**): Study of the ranking allocated to protected ranking (**PR**) 
+players upon their return. Two statistical approaches were implemented:
+  - Bradley–Terry model
+  - Logistic regression
+- Goal 2 (**G2**): Factors associated with victories among PR players.
+- Goal 3 (**G3**): Factors associated with retirements among PR players.
+
+## Conclusions
+
+- **G1**: The raw estimates show that PR players have a probability of **0.42** of 
+beating a `direct entry` player. However, after adjusting for ranking differences 
+between both players, PR players are more likely to win when the ranking 
+difference is hypothetically equal to 0. Therefore, the 
+**allocated ranking in PR appears justified**, as their win percentage is higher 
+than that of other players with comparable rankings. In fact, our analysis suggests 
+that this advantage could be even greater.
+
+- **G2**: The main factors associated with winning among PR players are:  
+    1. **ranking difference** relative to their opponents (as expected, a better 
+ranking is associated with higher winning probabilities);  
+    2. **age difference** (younger players tend to have higher chances of winning, 
+although this effect does not reach statistical significance); and  
+    3. **tournament category** (lower winning probabilities in Masters 1000 tournaments).
+
+- **G3**: During the study period, **2.4%** of PR players retired from matches. 
+Age difference was significantly associated with retirements.
+
+
+**Remark**: As the goal is to fit explanatory models, there is no need of 
+splitting the sample in train/test subsamples.
+
+# EDA
+
+## Variables
+
+**Relevant covariates**:
+
+- `surface`:       Grass/Clay/Hard/Carpet
+- `round`:         250 or 500/Masters/Tour Finals/Grand Slams
+- `tourney_level`: Preliminary/Final/Qualifying 
+- `year`:          2000-2024
+- `loser_hand`:    A/L/R/U (ambidextrous/Left/Right/Unknown of the winner?) --> To confirm by Victoria.
+- `winner_hand`:   A/L/R/U (ambidextrous/Left/Right/Unknown of the winner?)
+- `PR_hand`:       A/L/R/U (ambidextrous/Left/Right/Unknown of the PR?)
+- `non-PR_hand`:   A/L/R/U (ambidextrous/Left/Right/Unknown of the non-PR?)
+- `dif_age`:       difference between winner age and loser age.
+- `dif_rank`:      difference between winner rank and loser rank.
+- `dif_age_PR`:    difference between PR age and non-PR age.
+- `dif_rank_PR`:   difference between PR rank and non-PR rank.
+
+**Outcomes**: 
+
+- Goals 1 & 2: `PRW`. Protected Ranking Winner.
+- Goal 3: `Retirement`. Retirements.
+
+```{r echo=FALSE}
+data <- data %>%
+  mutate(tourney_level   = factor(as.character(tourney_level), 
+                                  levels = c("250 or 500","Masters","Tour Finals","Grand Slams")), 
+         surface         = fct_relevel(surface,      c("Grass","Clay","Hard","Carpet")),
+         round           = fct_relevel(round,        c("Qualifying","Preliminary","Final")),
+         win_better_rank = factor(if_else(winner_rank<loser_rank,'Yes','No'), levels=c('No','Yes')),
+         PRW             = factor(PRW))
+```
+
+# G1: Ranking well assigned
+
+We aim to assess whether the ranking assigned to PR players upon their return is appropriate.
+
+Finally, we decided not to remove matches in which both players had the same entry 
+type (n = `r with(data, sum(winner_entry == loser_entry))`), as these matches provide 
+valuable information regarding the influence of ranking on match outcomes. The final 
+sample consists of **`r nrow(data)`** matches.
+
+
+```{r}
+data1 <- data
+```
+
+## 1st approach: Bradley-Terry model
+
+### Aggregate data
+
+First, we must aggregate data before applying the Bradley Terry model.
+
+```{r}
+# Aggregate
+results <- data1 %>%
+  count(winner_entry, loser_entry, name = "wins") 
+
+# Count victories
+data_bt <- results %>% 
+  rename(player1 = winner_entry,
+         player2 = loser_entry,
+         win1 = wins) %>%
+  full_join(results %>%
+      rename(player1 = loser_entry,
+             player2 = winner_entry,
+             win2 = wins),
+    by = c("player1", "player2")
+  ) %>%
+  mutate(
+    win1 = ifelse(is.na(win1), 0, win1),
+    win2 = ifelse(is.na(win2), 0, win2)
+  )
+
+# Remove mirror duplicates
+LEV <- c('Direct Entry','Alternate','Lucky Loser','Protected Ranking',
+         'Qualifier','Special Exempt','Wild Card')
+data_bt <- data_bt %>%
+  filter(player1 < player2) %>% 
+  mutate(player1=factor(player1, levels=LEV),
+         player2=factor(player2, levels=LEV))
+```
+
+
+### Fitting the raw BT model
+
+The model indicates that the probability of winning for direct entry players is 
+higher than for any other entry type.
+
+```{r}
+raw_bt_model <- BTm(
+  cbind(win1, win2),
+  player1,
+  player2,
+  data = data_bt
+)
+
+summary(raw_bt_model)
+BTabilities(raw_bt_model)
+```
+For instance, the probability of a `protected ranking` (PR) player beats a 
+`direct entry` (DE) player is:
+
+$P(DE>PR)=\frac{e^-0.297}{e^-0.297 + e^0} \approx 0.42$
+
+But this probability doesn't take into account the ranking of both players. We can calculate this probability for each pair of players:
+
+**Matrix plot**
+
+The next matrix shows the probability that the "row player" wins the "column player" without taking into account other factors such as the ranking of both players.
+
+```{r}
+coef <- coef(raw_bt_model)
+V    <- vcov(raw_bt_model)
+
+BTa <- BTabilities(raw_bt_model)
+CAT <- rownames(BTa)
+nCAT <- length(CAT)
+MP <- matrix(NA,ncol=nCAT,nrow=nCAT)
+colnames(MP) <- rownames(MP) <- CAT 
+for(i in 1:nCAT){
+  for(j in 1:nCAT){
+    player1_ab  <- BTa[i,1]
+    player2_ab <- BTa[j,1]
+    p_win_1_to_2 <- exp(player1_ab)/(exp(player1_ab) + exp(player2_ab))
+    p_win_2_to_1 <- 1 - p_win_1_to_2 # = exp(player2_ab)/(exp(player1_ab) + exp(player2_ab))
+    MP[i,j] <- p_win_1_to_2
+    MP[j,i] <- p_win_2_to_1
+    
+    # 95%CI
+    eta <- coef["Direct"] - coef["Lucky"]
+    
+  }
+}
+pheatmap(MP,
+         color = colorRampPalette(c("blue", "white", "red"))(100),
+         cluster_rows = FALSE,
+         cluster_cols = FALSE,
+         display_numbers = TRUE)
+```
+
+**Matrix plot with 95% CI**
+
+```{r}
+bt_prob_ci <- function(model, ref) {
+  
+  # coeficientes y matriz var-cov
+  coefs <- coef(model)
+  V <- vcov(model)
+  
+  # add refernce with value zero
+  all_players <- c(ref, names(coefs))
+  theta <- c(0, coefs)
+  names(theta) <- all_players
+  
+  # expand matrix de var-cov including reference  
+  V_full <- matrix(0, length(theta), length(theta))
+  rownames(V_full) <- colnames(V_full) <- all_players
+  
+  # fill existent submatrix
+  V_full[names(coefs), names(coefs)] <- V
+  
+  # create results
+  res <- expand.grid(i = all_players, j = all_players)
+  
+  res$prob  <- NA
+  res$lower <- NA
+  res$upper <- NA
+  
+  for (k in 1:nrow(res)) {
+    
+    i <- res$i[k]
+    j <- res$j[k]
+    
+    # diferencia
+    eta <- theta[i] - theta[j]
+    
+    # varianza
+    var_eta <- V_full[i,i] + V_full[j,j] - 2 * V_full[i,j]
+    se_eta <- sqrt(var_eta)
+    
+    # IC en logit
+    lower_eta <- eta - 1.96 * se_eta
+    upper_eta <- eta + 1.96 * se_eta
+    
+    # transformar a probabilidad
+    res$prob[k]  <- plogis(eta)
+    res$lower[k] <- plogis(lower_eta)
+    res$upper[k] <- plogis(upper_eta)
+  }
+  
+  colnames(res)[1:2] <- c('player1','player2')
+  res$player1 <- gsub(pattern = '..',replacement = '',res$player1,fixed = TRUE)
+  res$player2 <- gsub(pattern = '..',replacement = '',res$player2,fixed = TRUE)
+  
+  return(res)
+}
+
+res <- bt_prob_ci(raw_bt_model, ref='Direct Entry')
+
+mat_prob <- res %>%
+  dplyr::select(player1, player2, prob) %>%
+  pivot_wider(names_from = player2, values_from = prob)
+
+ggplot(res, aes(player1, player2, fill = prob)) +
+  geom_tile() +
+  geom_text(aes(label = sprintf("%.2f\n[%.2f, %.2f]", 
+                                prob, lower, upper)),
+            size = 3) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0.5) +
+  theme_minimal() +
+  theme(axis.title  = element_blank(),
+        axis.text   = element_text(face='bold'),
+        axis.text.x = element_text(angle = 90))
+```
+
+
+**Forest plot**
+
+```{r warning=FALSE}
+BT_abb <- as.data.frame(BTabilities(raw_bt_model))
+d_abbilities <- data.frame(name= rownames(BT_abb)[-1],
+                           est = BT_abb$ability[-1],
+                           ll  = BT_abb$ability[-1] - qnorm(0.975) * BT_abb$s.e.[-1],
+                           ul  = BT_abb$ability[-1] + qnorm(0.975) * BT_abb$s.e.[-1])
+
+gg <- ggplot(d_abbilities, aes(y = name, x = est, xmin = ll, xmax = ul)) +
+  geom_pointrange() +
+  geom_vline(xintercept = 0, linetype = "dashed", color = "darkblue") +
+  # scale_x_continuous(trans='log',limits = c(0.5,2)) +
+  theme_minimal() +
+  labs(x = "Abilities regarding 'Direct Entry' players", y = "", title = "Raw abilities") +
+  theme(axis.text.y = element_text(size = 12), axis.title = element_text(size = 14))
+print(gg)
+
+
+ggsave("Abbilities_forestplot.tiff", plot = gg, device = "tiff", width = 8, height = 6, dpi = 300)
+```
+
+
+
+### Fitting the adjusted BT model
+
+For fitting the adjusted model, we define player A and player B at random by 
+assigning random labels (A/B) to the two players (winner/loser) in each match.
+
+```{r}
+# Alloocate random labels and create new variables
+set.seed(12345)
+data1 <- data1 %>% 
+  mutate(who_wins      = sample(c('A','B'),nrow(data1),rep=TRUE)) %>% 
+  mutate(rank_player_A = if_else(who_wins=="A",winner_rank,loser_rank)) %>% 
+  mutate(rank_player_B = if_else(who_wins=="B",winner_rank,loser_rank)) %>% 
+  mutate(dif_rank      = rank_player_B-rank_player_A) %>%  # Higher values --> better for A
+  mutate(dif_rank_log  = log(rank_player_B) - log(rank_player_A)) %>%  # Higher values --> better for A
+  mutate(win_A         = as.numeric(who_wins=='A'))  %>% 
+  mutate(win_B         = as.numeric(who_wins=='B'))  %>% 
+  mutate(entry_A0      = factor(if_else(win_A==1,winner_entry,loser_entry),levels=LEV))  %>%
+  mutate(entry_B0      = factor(if_else(win_B==1,winner_entry,loser_entry),levels=LEV))  %>%
+  mutate(entry_A       = factor(if_else(entry_A0 == "Protected Ranking",'PR','NON-PR'))) %>% 
+  mutate(entry_B       = factor(if_else(entry_B0 == "Protected Ranking",'PR','NON-PR'))) 
+# data1_complete <- data1 %>% 
+#   filter(complete.cases(dif_rank)) %>% 
+#   mutate(dif_rank_sc=dif_rank/100) # For convergence
+```
+
+
+Several attempts were made to fit the model while adjusting for ranking differences. 
+However, convergence problems arose in all scenarios. We tried:
+
+- Removing missing values
+- Dividing the rank difference by 100 to avoid large values
+- Adjusting using the difference of logarithms instead of the raw ranking difference
+
+None of these solutions proved successful.
+
+```{r}
+adj_bt_model <- BTm(
+  outcome = cbind(win_A, win_B),
+  player1 = entry_A0,
+  player2 = entry_B0,
+  ~ dif_rank_log,
+  data = data1
+)
+
+summary(adj_bt_model)
+```
+
+
+As we had convergence problems and interaction between entry type and rank difference
+was allowed, we have decide to prove other models.
+
+## 2nd approach: Logistic regression
+
+**Procedure**:
+
+- **Model 1**. We have fitted a model with outcome Y `A wins` and the difference in ranks (`Rank A-Rank B`) as the explanatory variable to assess the influence of the ranking on winning.
+- **Model 2**. We have included the interaction of the `entry type` with the `ranking difference` in the model to see if there is some difference in the behaviors of the PR and the remaining tennis players.
+
+Below, we can see the influence of the ranking on probability of winning. The residual analysis validates the model.
+
+```{r}
+# Aggregate data
+data_agg <- aggregate(cbind(pos=win_A, neg=1-win_A) ~ dif_rank, data=data1, sum)
+
+# Step 2
+mod_win_0 <- glm(cbind(pos, neg) ~ dif_rank, data_agg, family=binomial)
+summary(mod_win_0)
+# mod_win_0 <- glm(win_A ~ dif_rank, data, family=binomial)
+# summary(mod_win_0)
+
+# Check the model
+residualPlot(mod_win_0,ylim=c(-3,3))
+```
+
+Below, we can see how to consider the unadjusted differences in ranking depending on entry type. The residual analysis validates the model.
+
+```{r}
+# Aggregate data
+data_agg2 <- aggregate(cbind(pos=win_A, neg=1-win_A) ~ dif_rank + entry_A, data=data1, sum)
+
+# Step 3
+mod_win_1 <- glm(cbind(pos, neg)~dif_rank*entry_A, data_agg2, family=binomial)
+summary(mod_win_1)
+
+# Check the model
+residualPlots(mod_win_1, ylim=c(-3,3))
+
+# # Step 3
+# mod_win_1 <- glm(win_A~dif_rank*entry_A, data, family=binomial)
+# summary(mod_win_1)
+```
+**Interpretation**
+
+- Assuming a difference in rankings close to 0, PR players have a higher probability of winning:
+
+\begin{center}
+$OR_{PR}=e^{2.460e-01}\approx 1.28 \rightarrow$ It indicates that the ranking should be even better in PR when they return.
+\end{center}
+
+- The term of interaction is statistically significant. The negative sign indicates 
+that for PR players, the benefit for large differences in rankings is less than for 
+other players. For instance, a difference of 100 positions in the ranking:
+
+\begin{center}
+$OR_{NON-PR}=e^{100*3.927e-03}\approx 1.48$
+
+$OR_{PR}=e^{100*(3.927e-03-2.629e-03)}\approx 1.13$
+\end{center}
+
+It implies that the chances of winning increase less quickly in PR as the 
+ranking difference favors more and more the PR player.
+
+```{r}
+plot(allEffects(mod_win_1))
+```
+
+
+```{r}
+dif_rank_0 = seq(-1000,1000,5)
+d_plot_pred <- data.frame(dif_rank=rep(dif_rank_0,2)) # Ranking differences for making predictions
+d_plot_pred$type <- c(rep('PR',    length(dif_rank_0)),
+                      rep('NON-PR',length(dif_rank_0)))
+d_plot_pred$pred <- c(predict(mod_win_1, data.frame(dif_rank=dif_rank_0, entry_A='PR'),     type='response'),
+                      predict(mod_win_1, data.frame(dif_rank=dif_rank_0, entry_A='NON-PR'), type='response'))
+ggplot(d_plot_pred, aes(x = dif_rank, y = pred, colour = type)) + 
+  geom_line(linewidth = 1) +
+  xlab('Ranking difference') + ylab('Probability of winning') +
+  theme_minimal() +
+  theme(legend.title = element_blank(),
+        legend.position = "bottom") 
+```
+
+
+# G2: Factors associated to victories in PR
+
+## Dataset 
+
+The dataset selecting only protected ranking will be used for Goals 2 and 3
+
+- `Carpet` surface, with only 4 matches --> Category removed.
+- There are not protected ranking in `Tour finals` --> Category removed.
+
+
+```{r}
+# Filter data by Protected Ranking
+data_PR <- subset(data, PR == "Yes")
+
+data_PR <- data_PR %>%
+  filter(surface!="Carpet" & tourney_level!='ITF') %>% 
+  mutate(dif_age_PR    = if_else(PRW==1, winner_age-loser_age,   loser_age-winner_age),
+         dif_rank_PR   = if_else(PRW==1, loser_rank-winner_rank, winner_rank-loser_rank), # interchanged to increase interpretability --> high values implies PR is better
+         PR_hand       = if_else(PRW==1, winner_hand,            loser_hand),
+         non_PR_hand   = if_else(PRW==1, loser_hand,             winner_hand),
+         tourney_level = factor(tourney_level,levels = c("ITF","250 or 500","Masters","Grand Slams")),
+         surface       = factor(surface,      levels = c("Grass","Clay","Hard")))
+data_PR$PR_hand <- factor(data_PR$PR_hand)
+data_PR$non_PR_hand <- factor(data_PR$non_PR_hand)
+
+# Check
+# cbind(data_PR$winner_hand_PR,data_PR$winner_hand)
+# cbind(data_PR$dif_age,     data_PR$dif_age_PR)
+# cbind(data_PR$dif_rank,    data_PR$dif_rank_PR)
+# cbind(data_PR$winner_hand, data_PR$PR_hand)
+# dim(data_PR)
+
+
+## Select complete cases of relevant variables for goal 2
+d2.0 <- data_PR[,c("year", "surface", "tourney_level", "PR_hand", "non_PR_hand",
+                 "best_of", "round", "dif_age_PR", "dif_rank_PR", "PRW")]
+d2 <- d2.0[complete.cases(d2.0),]
+
+## Select complete cases of relevant variables for goal 3
+data_PR$Retirement_PR <- data_PR$PRL==1 & data_PR$Retirement
+d3.0 <- data_PR[,c("year", "surface", "tourney_level", "PR_hand", "non_PR_hand",
+                 "best_of", "round", "dif_age_PR", "dif_rank_PR", "Retirement_PR")]
+d3.0$Retirement <- factor(ifelse(d3.0$Retirement_PR,"Yes","No"), levels = c("No", "Yes"))
+d3.0$Retirement_PR <- NULL
+d3 <- d3.0[complete.cases(d3.0),]
+```
+
+## EDA
+
+See [Appendix I](#Appendix1)
+
+- Low correlations between continuous variables --> No collinearity problems
+- No interactions detected at univariable level.
+
+Descriptive table according to if protected ranking wins:
+
+```{r warning=FALSE}
+res_win <- compareGroups(PRW ~ year + surface + tourney_level + PR_hand + 
+                         non_PR_hand + best_of + round + dif_age_PR + dif_rank_PR,
+                         data = d2.0)
+tab_win <- createTable(res_win, show.p.overall = FALSE)
+print(tab_win)
+```
+
+
+
+
+## Model
+
+There are not related variable with retirements. **Remark**: Using other 
+variable-selection strategies, the result is the same.
+
+### First strategy: stepwise
+
+```{r}
+mod_prw_full_0 <- glm(PRW~.,d2,family=binomial)
+
+mod_prw_1 <- stats::step(mod_prw_full_0, direction = "both", trace = FALSE)
+summary(mod_prw_1)
+```
+### Second strategy: bootstrap selection
+
+With 1000 bootstrap iterations, we have selected the variables with a percentage higher than 70%. The only selected variable is the difference in rank between the PR player and the non-PR player.
+
+```{r}
+load('matrix_sel.RData')
+nboot <- 1000
+pred_vars <- names(d2)[-which(names(d2)=='PRW')]
+prop_var <- 100*apply(matrix_sel,2,sum)/nboot
+par(mar=c(5,10,5,1))
+co <- ifelse(sort(prop_var)>70,"darkgreen","grey")
+barplot(sort(prop_var),horiz=TRUE,las=1, xlab="% selected", col=co)
+sel_var <- pred_vars[which(prop_var>70)]
+form <- as.formula(paste('PRW ~',paste0(sel_var,collapse = '+')))
+mod_prw_2 <- glm(form, d2, family=binomial)
+summary(mod_prw_2)
+```
+
+### Interpretation of final model
+
+```{r}
+final_mod_win <- mod_prw_1
+summary(final_mod_win)
+```
+
+**Forest plot**
+
+Next figure shows the Odds Ratios (OR) of winning the match by the PR player associated to:
+
+- An increase of 100 positions in the difference between the ranking position of the PR player and the rival.
+- An increase of 5 years in the difference between the age of PR and the rival.
+- Playing in a Grand Slams tournament.
+- Playing in a masters tournament.
+
+```{r}
+model_win_summary0 <- tidy(final_mod_win, conf.int = TRUE, exp = TRUE)
+model_win_summary1 <- model_win_summary0[-1,]
+vars <- c('Masters','Grand Slams','Age difference (x5)','Rank difference (x100)')
+model_win_summary1$term <- factor(vars, level=vars)
+
+
+model_win_summary1$conf.low[3]  <- exp(5*(log(model_win_summary1$estimate[3]) -
+                                          2 * model_win_summary1$std.error[3]))
+model_win_summary1$conf.high[3] <- exp(5 *(log(model_win_summary1$estimate[3]) +
+                                           2 * model_win_summary1$std.error[3]))
+model_win_summary1$estimate[3]  <- exp(5*(log(model_win_summary1$estimate[3])))
+
+model_win_summary1$conf.low[4]  <- exp(100*(log(model_win_summary1$estimate[4]) -
+                                          2 * model_win_summary1$std.error[4]))
+model_win_summary1$conf.high[4] <- exp(100*(log(model_win_summary1$estimate[4]) +
+                                          2 * model_win_summary1$std.error[4]))
+model_win_summary1$estimate[4]  <- exp(100*(log(model_win_summary1$estimate[4])))
+
+gg <- ggplot(model_win_summary1, aes(y = term, x = estimate, xmin = conf.low, xmax = conf.high)) +
+  geom_pointrange() +
+  geom_vline(xintercept = 1, linetype = "dashed", color = "darkblue") +
+  scale_x_continuous(trans='log',limits = c(0.5,2)) +
+  theme_minimal() +
+  labs(x = "Odds Ratio", y = "", title = "Protected Ranking model for victories") +
+  theme(axis.text.y = element_text(size = 12), axis.title = element_text(size = 14))
+print(gg)
+
+
+ggsave("PR_win_forestplot.tiff", plot = gg, device = "tiff", width = 8, height = 6, dpi = 300)
+```
+
+
+
+# G3: Retirements in Protected Ranking
+
+## EDA
+
+See [Appendix II](#Appendix2) for more details
+
+- There are no interactions
+- Not enough data to assess linearity
+
+
+
+## Model
+
+There are not related variable with retirements. **Remark**: Using other 
+variable-selection strategies, the result is the same.
+
+
+```{r warning=FALSE}
+## Retirement of protected ranking
+mod_ret_null_0 <- glm(Retirement~1,d3,family=binomial)
+mod_ret_full_0 <- glm(Retirement~.,d3,family=binomial)
+
+mod_ret_1 <- stats::step(mod_ret_null_0, direction = "forward", 
+                         scope = formula(mod_ret_full_0), trace = FALSE)
+summary(mod_ret_1)
+
+final_mod_ret <- mod_ret_1
+```
+
+We can explore odds ratios:
+
+```{r warning=FALSE}
+model_ret_summary0 <- tidy(final_mod_ret, conf.int = TRUE, exp = TRUE)
+model_ret_summary0
+```
+
+
+
+## Descriptive of retirements in PR
+
+As there is non-relevant variables associated to retirements due to the lower 
+rate of retirements, only a descriptive analysis is provided.
+
+
+```{r warning=FALSE}
+res_ret <- compareGroups(Retirement ~ year + surface + tourney_level +
+                         PR_hand + non_PR_hand + best_of + round +
+                         dif_age_PR + dif_rank_PR,
+                         data = d3.0)
+tab_ret <- createTable(res_ret, show.p.overall = FALSE)
+print(tab_ret)
+```
+The proportion of retirements is:
+
+- The proportion of PR players retired is 2.4%.
+
+
+```{r}
+sum(d3$Retirement=='Yes')/nrow(d3)
+```
+
+
+# Appendices
+
+## Appendix I: EDA for victories in PR{#Appendix1}
+
+
+### Correlations
+
+```{r}
+cor_data <- data_PR[, c("year", "dif_rank", "dif_age")]
+cor_matrix <- cor(cor_data, use = "complete.obs")
+kable(cor_matrix, digits=3)
+corrplot(cor_matrix, method = "shade", type = "lower")
+```
+
+### Interactions
+
+We assess the interactions at univariable level. The p-values in the title indicate the statistical significance.
+
+**Using CART**
+
+Following Dani's advice, we fit a CART to explore potential interactions.
+
+```{r}
+mod_ct <- ctree(PRW~., data=d2)
+plot(mod_ct)
+```
+It seems that there is no potential interactions. However, let's visually explore.
+
+**1 continuous and 1 categorical**
+
+Not significant interactions at univariable level.
+
+```{r warning=FALSE}
+pval1 <- round(Anova(glm(PRW~surface*dif_age_PR,       data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval2 <- round(Anova(glm(PRW~surface*dif_rank_PR,      data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval3 <- round(Anova(glm(PRW~surface*year,             data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval4 <- round(Anova(glm(PRW~tourney_level*dif_age_PR, data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval5 <- round(Anova(glm(PRW~tourney_level*dif_rank_PR,data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval6 <- round(Anova(glm(PRW~tourney_level*year,       data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+
+ggplot(data_PR, aes(x = surface, y = dif_age, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, dif_age (p=",pval1,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = surface, y = dif_rank, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, dif_rank (p=",pval2,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = surface, y = year, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, year (p=",pval3,")")) +
+  theme_minimal()
+
+ggplot(data_PR, aes(x = tourney_level, y = dif_age, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, dif_age (p=",pval4,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = tourney_level, y = dif_rank, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, dif_rank (p=",pval5,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = tourney_level, y = year, fill = PRW)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, year (p=",pval6,")")) +
+  theme_minimal()
+```
+
+**2 categorical variables**
+
+No interactions
+
+```{r warning=FALSE}
+pval7 <- round(Anova(glm(PRW ~ surface*tourney_level,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+ggplot(data_PR, aes(x = tourney_level, fill = PRW)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ surface, scales = "free_y") +
+  labs(title = paste0("Interaction: Surface, tourney_level, dif_rank (p=",pval7,")")) +
+  theme(axis.text = element_text(angle = 90)) +
+  theme_minimal()
+```
+
+**2 continuous variable**
+
+- No interactions
+
+```{r warning=FALSE}
+pval8  <- round(Anova(glm(PRW~dif_age_PR*dif_rank_PR,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+pval9  <- round(Anova(glm(PRW~year*dif_rank_PR,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+pval10 <- round(Anova(glm(PRW~dif_age_PR*year,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+
+ggplot(data_PR, aes(x = dif_age_PR, y=dif_rank_PR, color = PRW)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: dif_rank, dif_age (p=",pval8,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = year, y=dif_rank_PR, color = PRW)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: year, dif_rank (p=",pval9,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = year, y=dif_age_PR, color = PRW)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: year, dif_age (p=",pval10,")")) +
+  theme_minimal()
+```
+
+
+
+### Linearity
+
+The + 0.5 is a correction to avoid division by zero if a count is zero.
+
+**Years**
+
+```{r}
+## Year
+table_lin   <- table(data_PR$year, data_PR$PRW) 
+logodd <- log((table_lin[,2]+.5) / (table_lin[,1]+.5)) 
+
+year <- as.numeric(rownames(table_lin)) 
+
+plot(year,logodd,xlab="Years",ylab="Log-odds of PRW",las=1, main="PRW")
+lines(lowess(logodd~year), col=4, lwd=2)
+```
+
+**Difference in ranking PR vs. Non-PR**
+
+```{r}
+## Diff rank
+q <- quantile(data_PR$dif_rank_PR,probs = seq(0,1,0.1), na.rm=TRUE)
+q_rep <- (q[-1] + q[-11])/2
+data_PR$dif_rank_cat <- cut(data_PR$dif_rank, br = q , include.lowest = TRUE)
+table_lin <- table(data_PR$dif_rank_cat, data_PR$PRW) 
+logodd <- as.numeric(log((table_lin[,2]+.5) / (table_lin[,1]+.5))) 
+
+plot(q_rep,logodd,xlab="Diff Rank",ylab="Log-odds of PRW",las=1, main="PRW")
+lines(lowess(logodd~q_rep), col=4, lwd=2)
+```
+
+**Difference in age PR vs. Non-PR**
+
+```{r}
+## Diff age
+q <- quantile(data_PR$dif_age_PR,probs = seq(0,1,0.1), na.rm=TRUE)
+q_rep <- (q[-1] + q[-11])/2
+data_PR$dif_age_cat <- cut(data_PR$dif_age, br = q, include.lowest = TRUE)
+table_lin <- table(data_PR$dif_age_cat, data_PR$PRW) 
+logodd <- as.numeric(log((table_lin[,2]+.5) / (table_lin[,1]+.5)))
+
+plot(q_rep,logodd,xlab="Diff Age",ylab="Log-odds of PRW",las=1, main="PRW")
+lines(lowess(logodd~q_rep), col=4, lwd=2)
+```
+
+
+## Appendix II: EDA for retirements in PR{#Appendix2}
+
+### Interactions
+
+We assess the interactions at univariable level. The p-values in the title indicate the statistical significance.
+
+**1 continuous and 1 categorical**
+
+Not significant interactions at univariable level.
+
+```{r warning=FALSE}
+pval1 <- round(Anova(glm(Retirement~surface*dif_age_PR,       data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval2 <- round(Anova(glm(Retirement~surface*dif_rank_PR,      data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval3 <- round(Anova(glm(Retirement~surface*year,             data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval4 <- round(Anova(glm(Retirement~tourney_level*dif_age_PR, data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval5 <- round(Anova(glm(Retirement~tourney_level*dif_rank_PR,data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+pval6 <- round(Anova(glm(Retirement~tourney_level*year,       data_PR, family=binomial))$`Pr(>Chisq)`[3],3)
+
+ggplot(data_PR, aes(x = surface, y = dif_age, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, dif_age (p=",pval1,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = surface, y = dif_rank, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, dif_rank (p=",pval2,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = surface, y = year, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: Surface, year (p=",pval3,")")) +
+  theme_minimal()
+
+ggplot(data_PR, aes(x = tourney_level, y = dif_age, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, dif_age (p=",pval4,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = tourney_level, y = dif_rank, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, dif_rank (p=",pval5,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = tourney_level, y = year, fill = Retirement)) +
+  geom_boxplot() +
+  labs(title = paste0("Interaction: tourney_level, year (p=",pval6,")")) +
+  theme_minimal()
+```
+
+**2 categorical variables**
+
+No interactions
+
+```{r warning=FALSE}
+pval7 <- round(Anova(glm(Retirement ~ surface*tourney_level,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+ggplot(data_PR, aes(x = tourney_level, fill = Retirement)) +
+  geom_bar(position = "dodge") +
+  facet_wrap(~ surface, scales = "free_y") +
+  labs(title = paste0("Interaction: Surface, tourney_level, dif_rank (p=",pval7,")")) +
+  theme(axis.text = element_text(angle = 90)) +
+  theme_minimal()
+```
+
+**2 continuous variable**
+
+- No interactions
+
+```{r warning=FALSE}
+pval8  <- round(Anova(glm(Retirement~dif_age_PR*dif_rank_PR,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+pval9  <- round(Anova(glm(Retirement~year*dif_rank_PR,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+pval10 <- round(Anova(glm(Retirement~dif_age_PR*year,data_PR,family=binomial))$`Pr(>Chisq)`[3],3)
+
+ggplot(data_PR, aes(x = dif_age_PR, y=dif_rank_PR, color = Retirement)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: dif_rank, dif_age (p=",pval8,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = year, y=dif_rank_PR, color = Retirement)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: year, dif_rank (p=",pval9,")")) +
+  theme_minimal()
+ggplot(data_PR, aes(x = year, y=dif_age_PR, color = Retirement)) +
+  geom_point() +
+  geom_smooth() +
+  labs(title = paste0("Interaction: year, dif_age (p=",pval10,")")) +
+  theme_minimal()
+```
+
+
+
+### Linearity
+
+The + 0.5 is a correction to avoid division by zero if a count is zero.
+
+**Years**
+
+```{r}
+## Year
+table_lin   <- table(data_PR$year, data_PR$Retirement) 
+logodd <- log((table_lin[,2]+.5) / (table_lin[,1]+.5)) 
+
+year <- as.numeric(rownames(table_lin)) 
+
+plot(year,logodd,xlab="Years",ylab="Log-odds of Retirement",las=1, main="Retirement")
+lines(lowess(logodd~year), col=4, lwd=2)
+```
+
+**Difference in ranking PR vs. Non-PR**
+
+```{r}
+## Diff rank
+q <- quantile(data_PR$dif_rank_PR,probs = seq(0,1,0.1), na.rm=TRUE)
+q_rep <- (q[-1] + q[-11])/2
+data_PR$dif_rank_cat <- cut(data_PR$dif_rank_PR, br = q , include.lowest = TRUE)
+table_lin <- table(data_PR$dif_rank_cat, data_PR$Retirement) 
+logodd <- as.numeric(log((table_lin[,2]+.5) / (table_lin[,1]+.5))) 
+
+plot(q_rep,logodd,xlab="Diff Rank",ylab="Log-odds of Retirement",las=1, main="Retirement")
+lines(lowess(logodd~q_rep), col=4, lwd=2)
+```
+
+**Difference in age PR vs. Non-PR**
+
+```{r}
+## Diff age
+q <- quantile(data_PR$dif_age_PR,probs = seq(0,1,0.1), na.rm=TRUE)
+q_rep <- (q[-1] + q[-11])/2
+data_PR$dif_age_cat <- cut(data_PR$dif_age_PR, br = q, include.lowest = TRUE)
+table_lin <- table(data_PR$dif_age_cat, data_PR$Retirement) 
+logodd <- as.numeric(log((table_lin[,2]+.5) / (table_lin[,1]+.5)))
+
+plot(q_rep,logodd,xlab="Diff Age",ylab="Log-odds of Retirement",las=1, main="Retirement")
+lines(lowess(logodd~q_rep), col=4, lwd=2)
+```
+
